@@ -4,23 +4,24 @@ import datetime
 import requests
 import math
 from urllib.parse import urlparse
+import tldextract
+from utils.trusted_domains import is_domain_trusted
 
-# suspicious phishing keywords
+# suspicious phishing keywords (NOT brand names — those are checked separately)
 SUSPICIOUS_WORDS = [
     "login","verify","update","bank","secure",
-    "account","free","bonus","win","password",
-    "confirm","click","urgent","support","help",
-    "service","webscr","paypal","ebay","amazon","apple","google","microsoft"
+    "account","free","bonus","password",
+    "confirm","urgent","webscr","signin","billing"
 ]
 
 SUSPICIOUS_TLDS = ["tk","ml","ga","cf","xyz","top","work",
-                   "click","online","site","club","info","biz",
+                   "click","online","site","club","biz",
                    "pw","icu","loan","win","date","review",
-                   "gq","cf","ga","ml","tk"]
+                   "gq"]
 
-SHORTENERS = [
-    "bit.ly","tinyurl","goo.gl","t.co","rebrand.ly",
-    "cutt.ly","shorturl","ow.ly","is.gd",
+SHORTENER_DOMAINS = [
+    "bit.ly","tinyurl.com","goo.gl","t.co","rebrand.ly",
+    "cutt.ly","shorturl.at","ow.ly","is.gd",
     "buff.ly","adf.ly","bit.do","shorte.st","tr.im"
 ]
 
@@ -73,11 +74,21 @@ def check_url_risk(url):
         reasons.append("URL uses IP address instead of domain")
 
     # 4️⃣ Suspicious words in URL
-    for word in SUSPICIOUS_WORDS:
-        if word in url.lower():
-            score += 10
-            reasons.append(f"Suspicious keyword found: {word}")
-            # 5️⃣ Multiple subdomains
+    # Extract the registered domain for smart checks
+    ext = tldextract.extract(url)
+    registered_domain = f"{ext.domain}.{ext.suffix}".lower()
+    is_legit = is_domain_trusted(url)
+
+    # 4️⃣ Suspicious words in URL path (skip domain part to avoid false positives)
+    path_and_query = parsed.path + (parsed.query or "")
+    if not is_legit:
+        for word in SUSPICIOUS_WORDS:
+            if word in path_and_query.lower():
+                score += 10
+                reasons.append(f"Suspicious keyword found: {word}")
+                break  # only count once
+
+    # 5️⃣ Multiple subdomains
     if parsed.netloc.count('.') > 3:
         score += 20
         reasons.append("Too many subdomains (phishing pattern)")
@@ -98,22 +109,30 @@ def check_url_risk(url):
         reasons.append("Too many hyphens in domain")
 
     # 9️⃣ Suspicious TLD
-    tld = parsed.netloc.split('.')[-1]
-    if tld in SUSPICIOUS_TLDS:
+    tld = ext.suffix.split('.')[-1]
+    if tld in SUSPICIOUS_TLDS and not is_legit:
         score += 25
         reasons.append(f"Suspicious domain extension: .{tld}")
 
-        # URL shortener detection
-    for short in SHORTENERS:
-        if short in url:
+    # 🔟 URL shortener detection (match DOMAIN, not substring)
+    for short in SHORTENER_DOMAINS:
+        if registered_domain == short:
             score += 30
             reasons.append("URL shortener used (common phishing trick)")
+            break
 
     return score, reasons
 
 def check_domain_reputation(url):
-    score = 5   # small baseline risk
-    reasons = ["Internet baseline risk"]
+    score = 0
+    reasons = []
+
+    # Check if this is a known legit domain
+    ext = tldextract.extract(url)
+    registered_domain = f"{ext.domain}.{ext.suffix}".lower()
+    if is_domain_trusted(url):
+        reasons.append("Well-known trusted domain")
+        return 0, reasons
 
     try:
         domain_info = whois.whois(url)
@@ -135,19 +154,26 @@ def check_domain_reputation(url):
                 reasons.append("Recently registered domain")
 
             else:
-                score -= 5
-                reasons.append("Old trusted domain")
+                reasons.append("Established domain")
 
     except:
         # WHOIS hidden is normal → do NOT add risk
         reasons.append("WHOIS privacy enabled")
 
-    return max(score,0), reasons
+    return max(score, 0), reasons
 def check_brand_impersonation(url):
     score = 0
     reasons = []
 
     lowered = url.lower()
+
+    # Extract the actual registered domain
+    ext = tldextract.extract(url)
+    registered_domain = f"{ext.domain}.{ext.suffix}".lower()
+
+    # If the URL IS the real brand domain, skip impersonation checks
+    if is_domain_trusted(url):
+        return 0, []
 
     SUSPICIOUS_BRAND_WORDS = [
         "login","secure","verify","account","update","bank","signin"
@@ -155,7 +181,7 @@ def check_brand_impersonation(url):
 
     for brand in BRANDS:
         if brand in lowered:
-            # Check if suspicious word also exists
+            # Brand name found in URL but NOT the real brand domain
             for word in SUSPICIOUS_BRAND_WORDS:
                 if word in lowered:
                     score += 40
